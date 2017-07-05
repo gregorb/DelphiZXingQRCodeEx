@@ -98,12 +98,16 @@ type
     FAfterUpdate: TNotifyEvent;
     FBeforeUpdate: TNotifyEvent;
     FUpdateLockCount: Integer;
+    FVersion: Integer;
+    FECI: integer;
     procedure SetEncoding(NewEncoding: Integer);
     procedure SetData(const NewData: WideString);
     procedure SetQuietZone(NewQuietZone: Integer);
     procedure SetErrorCorrectionOrdinal(Value: TErrorCorrectionOrdinal);
     function GetIsBlack(Row, Column: Integer): Boolean;
     function GetEncoderClass: TEncoderClass;
+    procedure SetVersion(Value: integer);
+    procedure SetECI(const Value: integer);
   public
     constructor Create;
     destructor Destroy; override;
@@ -126,7 +130,10 @@ type
     // error correction level, see TErrorCorrectionOrdinal type above
     property ErrorCorrectionOrdinal: TErrorCorrectionOrdinal read
       FErrorCorrectionOrdinal write SetErrorCorrectionOrdinal;
+    // QR version, default = automatic
+    property Version : integer read FVersion write SetVersion;
     // input string after TEncoder filtering
+    property ECI : integer read FECI write SetECI;
     property FilteredData: WideString read FFilteredData;
     // margins size, from 0 to 100, default 4
     property QuietZone: Integer read FQuietZone write SetQuietZone;
@@ -197,7 +204,7 @@ type
   public
     // do encoding (call ChooseMode, FilterContent, and AppendBytes)
     function Encode(const Content: WideString; EncodeOptions: Integer;
-      ECLevel: TErrorCorrectionLevel; QRCode: TQRCode): WideString;
+      ECLevel: TErrorCorrectionLevel; ECI, ForceVersion : Integer; QRCode: TQRCode): WideString;
     constructor Create;
     property EncoderError: Boolean read FEncoderError;
   end;
@@ -1002,7 +1009,7 @@ begin
 end;
 
 function TEncoder.Encode(const Content: WideString; EncodeOptions: Integer;
-  ECLevel: TErrorCorrectionLevel; QRCode: TQRCode): WideString;
+  ECLevel: TErrorCorrectionLevel; ECI, ForceVersion : Integer; QRCode: TQRCode): WideString;
 var
   Mode: TMode;
   DataBits: TBitArray;
@@ -1032,34 +1039,48 @@ begin
   Result := FilterContent(Content, Mode, EncodeOptions);
   AppendBytes(Result, Mode, DataBits, EncodeOptions);
 
+  // Append ECI segment if applicable
+  if (ECI <> 0) and (Mode = qmByte) then
+  begin
+    AppendModeInfo(qmECI, HeaderBits);
+    HeaderBits.AppendBits(ECI, 8);
+  end;
+
   // (With ECI in place,) Write the mode marker
   AppendModeInfo(Mode, HeaderBits);
 
-  // Hard part: need to know version to know how many bits length takes. But need to know how many
-  // bits it takes to know version. First we take a guess at version by assuming version will be
-  // the minimum, 1:
-  ProvisionalVersion := TVersion.GetVersionForNumber(1);
-  try
-    ProvisionalBitsNeeded := HeaderBits.GetSize +
-      GetModeCharacterCountBits(Mode, ProvisionalVersion) +
-      DataBits.GetSize;
-  finally
-    ProvisionalVersion.Free;
-  end;
+  if ForceVersion > 0 then
+    Version := TVersion.GetVersionForNumber(ForceVersion)
+  else
+  begin
 
-  ProvisionalVersion := TVersion.ChooseVersion(ProvisionalBitsNeeded, ECLevel);
+    // Hard part: need to know version to know how many bits length takes. But need to know how many
+    // bits it takes to know version. First we take a guess at version by assuming version will be
+    // the minimum, 1:
+    ProvisionalVersion := TVersion.GetVersionForNumber(1);
+    try
+      ProvisionalBitsNeeded := HeaderBits.GetSize +
+        GetModeCharacterCountBits(Mode, ProvisionalVersion) +
+        DataBits.GetSize;
+    finally
+      ProvisionalVersion.Free;
+    end;
 
-  if not Assigned(ProvisionalVersion) then
-    raise EQRMatrixTooLarge.Create(SQRMatrixTooLarge);
+    ProvisionalVersion := TVersion.ChooseVersion(ProvisionalBitsNeeded, ECLevel);
 
-  try
-    // Use that guess to calculate the right version. I am still not sure this works in 100% of cases.
-    BitsNeeded := HeaderBits.GetSize +
-      GetModeCharacterCountBits(Mode, ProvisionalVersion) +
-      DataBits.GetSize;
-    Version := TVersion.ChooseVersion(BitsNeeded, ECLevel);
-  finally
-    ProvisionalVersion.Free;
+    if not Assigned(ProvisionalVersion) then
+      raise EQRMatrixTooLarge.Create(SQRMatrixTooLarge);
+
+    try
+      // Use that guess to calculate the right version. I am still not sure this works in 100% of cases.
+      BitsNeeded := HeaderBits.GetSize +
+        GetModeCharacterCountBits(Mode, ProvisionalVersion) +
+        DataBits.GetSize;
+      Version := TVersion.ChooseVersion(BitsNeeded, ECLevel);
+    finally
+      ProvisionalVersion.Free;
+    end;
+
   end;
 
   if not Assigned(Version) then
@@ -3279,6 +3300,24 @@ begin
   end;
 end;
 
+procedure TDelphiZXingQRCode.SetVersion(Value: integer);
+begin
+  if FVersion <> Value then
+  begin
+    FVersion := Value;
+    Update;
+  end;
+end;
+
+procedure TDelphiZXingQRCode.SetECI(const Value: integer);
+begin
+  if FEci <> Value then
+  begin
+    FECI := Value;
+    Update;
+  end;
+end;
+
 procedure TDelphiZXingQRCode.Update;
 var
   Encoder: TEncoder;
@@ -3302,7 +3341,7 @@ begin
   QRCode := TQRCode.Create;
   FFilteredData := '';
   try
-    FFilteredData := Encoder.Encode(FData, FEncoding, Level, QRCode);
+    FFilteredData := Encoder.Encode(FData, FEncoding, Level, FECI, FVersion, QRCode);
     if Assigned(QRCode.FMatrix) then
     begin
       SetLength(FElements, QRCode.FMatrix.FHeight);
